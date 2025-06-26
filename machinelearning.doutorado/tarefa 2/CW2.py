@@ -160,9 +160,6 @@ def nmf(matrix, k, max_iter=1000, tol=0.01, alpha=0.0001, beta=0.0001, epsilon=1
     W = np.random.rand(n_users, k) * 0.1
     H = np.random.rand(k, n_movies) * 0.1
 
-    W_old = W.copy()
-    H_old = H.copy()
-
     # Normaliza as colunas de W para somar 1
     W = W / np.sum(W, axis=0, keepdims=True)
     H = H / np.sum(H, axis=1, keepdims=True)
@@ -175,6 +172,9 @@ def nmf(matrix, k, max_iter=1000, tol=0.01, alpha=0.0001, beta=0.0001, epsilon=1
 
     # Iterações do algoritmo
     for iter in range(max_iter):
+        W_old = W.copy()
+        H_old = H.copy()
+
         # Calcula a perda atual (RMSE nos elementos observados)
         prediction = W @ H
         error = mask * (Y - prediction)
@@ -200,15 +200,12 @@ def nmf(matrix, k, max_iter=1000, tol=0.01, alpha=0.0001, beta=0.0001, epsilon=1
             H = H / np.sum(H, axis=1, keepdims=True)
 
         # Verifica convergência
-        W_change = np.max(W - W_old) / (np.max(W_old))
-        H_change = np.max(H - H_old) / (np.max(H_old))
+        W_change = np.max(np.abs(W - W_old)) / (np.max(W_old))
+        H_change = np.max(np.abs(H - H_old)) / (np.max(H_old))
 
         if W_change < tol and H_change < tol:
             print(f"Convergência alcançada após {iter+1} iterações")
             break
-
-        W_old = W.copy()
-        H_old = H.copy()
 
         # Print para debugar
         #print(f"Soma total de H: {H.sum()}")
@@ -290,186 +287,170 @@ for i in random_indices:
     real = test_matrix[user, movie]
     pred = predictions[user, movie]
     print(f"Usuário {user}, Filme {movie}: Real = {real:.2f}, Previsto = {pred:.2f}, Erro = {abs(real-pred):.2f}")
-# %% [markdown]
-# ## 3. Implementação do Sistema de Recomendação usando SLIM
-
 # %%
-def slim(matrix, learning_rate=0.01, l1_reg=0.01, l2_reg=0.01, max_iter=1000, tol=0.01, epsilon=1e-8):
+# Calcular RMSE no conjunto de validação
+val_mask = (val_matrix > 0).astype(int)
+val_error = val_mask * (val_matrix - predictions)
+val_rmse = np.sqrt(np.sum(val_error**2) / np.sum(val_mask))
+print(f"\nRMSE no conjunto de validação: {val_rmse:.4f}")
+# %%
+# %% [markdown]
+# ## 3. Implementação do Sistema de Recomendação usando SVD
+# %%
+def svd(matrix, k, max_iter=1000, tol=0.01, regularization=0.0):
     """
-    Implementa o algoritmo SLIM (Sparse Linear Methods) usando gradiente descendente com projeção.
+    Implementa o algoritmo de recomendação baseado em SVD para matrizes com valores ausentes.
 
     Parâmetros:
-    - matrix: matriz de treino R (usuários x itens)
-    - learning_rate: taxa de aprendizado para o gradiente descendente
-    - l1_reg: parâmetro de regularização L1 (controla a esparsidade)
-    - l2_reg: parâmetro de regularização L2 (evita overfitting)
+    - matrix: matriz de treino R (usuários x filmes) com valores ausentes (zeros)
+    - k: número de fatores latentes (rank da aproximação)
     - max_iter: número máximo de iterações
-    - tol: tolerância para convergência (mudança relativa)
-    - epsilon: pequeno valor para evitar divisão por zero
+    - tol: tolerância para convergência
+    - regularization: parâmetro de regularização para SVD
 
     Retorna:
-    - M: matriz de similaridade entre itens (itens x itens)
+    - Q: matriz de fatores latentes dos usuários
+    - Sigma: matriz diagonal de valores singulares
+    - P: matriz de fatores latentes dos filmes
     - losses: vetor com os valores de perda em cada iteração
     """
-    n_users, n_items = matrix.shape
-    R = matrix.copy()  # Matriz de ratings
+    R = matrix.copy()
+    n_users, n_movies = R.shape
 
-    # Inicializar M com valores pequenos não-negativos
-    np.random.seed(42)
-    M = np.random.rand(n_items, n_items) * 0.01
-
-    # Forçar diagonal para ser zero (um item não deve recomendar a si mesmo)
-    np.fill_diagonal(M, 0)
-
-    # Vetor para armazenar os valores de perda
     losses = []
 
-    # Máscara para elementos não-zero na matriz original
-    mask = (R > 0).astype(float)
+    # Máscara para para ausentes e presentes
+    missing_mask = (R == 0)
+    mask = (R > 0).astype(int)
 
-    # Matriz M anterior para verificar convergência
-    M_old = M.copy()
+    # Inicializa Rf preenchendo valores ausentes com médias das linhas (vetorizado)
+    Rf = R.copy()
+    row_means = np.sum(R, axis=1) / np.sum(mask, axis=1)
+    means_matrix = np.tile(row_means.reshape(-1, 1), (1, n_movies))
+    Rf = R + (means_matrix * missing_mask.astype(int))
 
     # Iterações do algoritmo
     for iter in range(max_iter):
-        # Calcular previsões: R_pred = R * M
-        R_pred = R @ M
+        Rf_old = Rf.copy()
 
-        # Calcular erro nos elementos observados
-        error = mask * (R - R_pred)
+        # SVD de rank-k em Rf
+        if regularization > 0:
+            # SVD regularizado
+            U, s, Vt = np.linalg.svd(Rf, full_matrices=False)
 
-        # Calcular perda (RMSE + regularização)
-        rmse = np.sqrt(np.sum(error**2) / np.sum(mask))
-        l1_penalty = l1_reg * np.sum(np.abs(M))
-        l2_penalty = l2_reg * np.sum(M**2)
-        loss = rmse + l1_penalty + l2_penalty
+            s_reg = s / (s + regularization)
+
+            Q = U[:, :k]
+            Sigma = np.diag(s[:k] * s_reg[:k])
+            P = Vt[:k, :].T
+        else:
+            # SVD padrão
+            U, s, Vt = np.linalg.svd(Rf, full_matrices=False)
+
+            Q = U[:, :k]
+            Sigma = np.diag(s[:k])
+            P = Vt[:k, :].T
+
+        R_approx = Q @ Sigma @ P.T
+
+        # Atualizar apenas as entradas originalmente ausentes
+        Rf = R.copy()
+        Rf[missing_mask] = R_approx[missing_mask]
+
+        # Calcula RMSE
+        error = mask * (R - R_approx)
+        loss = np.sqrt(np.sum(error**2) / np.sum(mask))
         losses.append(loss)
 
-        # Calcular gradiente
-        gradient = -2 * (R.T @ error) + 2 * l2_reg * M
-
-        # Para regularização L1, adicionamos o sinal de M
-        l1_grad = l1_reg * np.sign(M)
-        gradient += l1_grad
-
-        # Atualizar M usando gradiente descendente
-        M = M - learning_rate * gradient
-
-        # Projeção para garantir não-negatividade
-        M = np.maximum(M, 0)
-
-        # Forçar diagonal para ser zero
-        np.fill_diagonal(M, 0)
-
         # Verificar convergência
-        if np.max(M_old) > epsilon:
-            rel_change = np.max(np.abs(M - M_old)) / np.max(np.abs(M_old))
-            if rel_change < tol:
-                print(f"Convergência alcançada após {iter+1} iterações")
-                break
-
-        M_old = M.copy()
-
-        # Print para debugar (a cada 100 iterações)
-        if iter % 100 == 0:
-            print(f"Iteração {iter}, Perda: {loss:.4f}, RMSE: {rmse:.4f}")
+        change = np.max(np.abs(Rf - Rf_old)) / (np.max(Rf_old))
+        if change < tol:
+            print(f"Convergência alcançada após {iter+1} iterações")
+            break
 
     if iter == max_iter - 1:
         print(f"Número máximo de iterações ({max_iter}) alcançado sem convergência")
 
-    return M, losses
 
-# %%
-# Executar o algoritmo SLIM no conjunto de treinamento
-M, slim_losses = slim(train_matrix, learning_rate=0.001, l1_reg=0.1, l2_reg=0.1)
+    # Calcular a decomposição SVD final
+    U, s, Vt = np.linalg.svd(Rf, full_matrices=False)
+    Q = U[:, :k]
+    Sigma = np.diag(s[:k])
+    P = Vt[:k, :].T
 
+    return Q, Sigma, P, losses
 # %%
-# Visualizar a curva de perda do SLIM
+# Executar o algoritmo SVD no conjunto de treinamento
+k = 10
+Q, Sigma, P, losses_svd = svd(train_matrix, k, regularization=0)
+
+# Visualizar a curva de perda
 plt.figure(figsize=(10, 5))
-plt.plot(slim_losses)
+plt.plot(losses_svd)
 plt.xlabel('Iteração')
-plt.ylabel('Perda (RMSE + Regularização)')
-plt.title('Curva de Perda do SLIM')
+plt.ylabel('Perda (RMSE)')
+plt.title('Curva de Perda do SVD')
 plt.grid(True, alpha=0.3)
 plt.show()
-
 # %%
-# Gerar previsões usando o modelo SLIM
-slim_predictions = train_matrix @ M
+# Gerar previsões usando o modelo SVD
+predictions_svd = Q @ Sigma @ P.T
 
+print("\nComparação de previsões no conjunto de treinamento:")
+
+# Selecionar 10 pontos aleatórios com avaliações > 0
+nonzero_indices = np.where(train_matrix > 0)
+random_indices = np.random.choice(len(nonzero_indices[0]), 10, replace=False)
+print("\nPontos com avaliações > 0:")
+for i in random_indices:
+    user = nonzero_indices[0][i]
+    movie = nonzero_indices[1][i]
+    real = train_matrix[user, movie]
+    pred = predictions_svd[user, movie]
+    print(f"Usuário {user}, Filme {movie}: Real = {real:.2f}, Previsto = {pred:.2f}, Erro = {abs(real-pred):.2f}")
+
+# Selecionar 10 pontos aleatórios com avaliações = 0
+zero_indices = np.where(train_matrix == 0)
+random_indices = np.random.choice(len(zero_indices[0]), 10, replace=False)
+print("\nPontos com avaliações = 0:")
+for i in random_indices:
+    user = zero_indices[0][i]
+    movie = zero_indices[1][i]
+    pred = predictions_svd[user, movie]
+    print(f"Usuário {user}, Filme {movie}: Previsto = {pred:.2f}")
+# %%
 # Comparar previsões com valores reais no conjunto de validação
-print("\nComparação de previsões SLIM no conjunto de validação:")
+print("\nComparação de previsões SVD no conjunto de validação:")
 
 # Selecionar 10 pontos aleatórios com avaliações > 0
 nonzero_indices = np.where(val_matrix > 0)
 random_indices = np.random.choice(len(nonzero_indices[0]), 10, replace=False)
 print("\nPontos com avaliações > 0:")
-val_errors = []
 for i in random_indices:
     user = nonzero_indices[0][i]
     movie = nonzero_indices[1][i]
     real = val_matrix[user, movie]
-    pred = slim_predictions[user, movie]
-    error = abs(real - pred)
-    val_errors.append(error)
-    print(f"Usuário {user}, Filme {movie}: Real = {real:.2f}, Previsto = {pred:.2f}, Erro = {error:.2f}")
-
-print(f"\nErro médio absoluto na validação: {np.mean(val_errors):.4f}")
-
+    pred = predictions_svd[user, movie]
+    print(f"Usuário {user}, Filme {movie}: Real = {real:.2f}, Previsto = {pred:.2f}, Erro = {abs(real-pred):.2f}")
 # %%
 # Comparar previsões com valores reais no conjunto de teste
-print("\nComparação de previsões SLIM no conjunto de teste:")
+print("\nComparação de previsões no conjunto de teste:")
 
 # Selecionar 10 pontos aleatórios com avaliações > 0
 nonzero_indices = np.where(test_matrix > 0)
 random_indices = np.random.choice(len(nonzero_indices[0]), 10, replace=False)
 print("\nPontos com avaliações > 0:")
-test_errors = []
 for i in random_indices:
     user = nonzero_indices[0][i]
     movie = nonzero_indices[1][i]
     real = test_matrix[user, movie]
-    pred = slim_predictions[user, movie]
-    error = abs(real - pred)
-    test_errors.append(error)
-    print(f"Usuário {user}, Filme {movie}: Real = {real:.2f}, Previsto = {pred:.2f}, Erro = {error:.2f}")
-
-print(f"\nErro médio absoluto no teste: {np.mean(test_errors):.4f}")
+    pred = predictions_svd[user, movie]
+    print(f"Usuário {user}, Filme {movie}: Real = {real:.2f}, Previsto = {pred:.2f}, Erro = {abs(real-pred):.2f}")
+# %%
+# Calcular RMSE no conjunto de validação
+val_mask = (val_matrix > 0).astype(int)
+val_error = val_mask * (val_matrix - predictions_svd)
+val_rmse = np.sqrt(np.sum(val_error**2) / np.sum(val_mask))
+print(f"\nRMSE no conjunto de validação: {val_rmse:.4f}")
 
 # %%
-# Visualizar a matriz de similaridade M
-plt.figure(figsize=(10, 8))
-plt.imshow(M, cmap='viridis')
-plt.colorbar(label='Similaridade')
-plt.title('Matriz de Similaridade SLIM')
-plt.xlabel('Itens')
-plt.ylabel('Itens')
-plt.tight_layout()
-plt.show()
-
-# %%
-# Calcular esparsidade da matriz M
-sparsity = 1 - (np.count_nonzero(M) / (M.shape[0] * M.shape[1]))
-print(f"Esparsidade da matriz M: {sparsity:.4f} ({sparsity*100:.2f}%)")
-
-# %%
-# Mostrar as top recomendações para alguns usuários aleatórios usando SLIM
-def show_slim_recommendations(user_idx, n_recommendations=5):
-    """
-    Mostra as top recomendações para um usuário específico usando SLIM
-    """
-    # Filmes não avaliados pelo usuário
-    unrated_movies = np.where(train_matrix[user_idx] == 0)[0]
-
-    # Ordenar por pontuação prevista
-    top_indices = unrated_movies[np.argsort(-slim_predictions[user_idx, unrated_movies])][:n_recommendations]
-
-    print(f"\nTop {n_recommendations} recomendações SLIM para o Usuário {user_idx}:")
-    for i, movie_idx in enumerate(top_indices, 1):
-        score = slim_predictions[user_idx, movie_idx]
-        print(f"{i}. Filme {movie_idx}: Pontuação prevista = {score:.2f}")
-
-# Mostrar recomendações para 3 usuários aleatórios
-random_users = np.random.choice(train_matrix.shape[0], 3, replace=False)
-for user in random_users:
-    show_slim_recommendations(user)
