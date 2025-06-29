@@ -454,3 +454,707 @@ val_rmse = np.sqrt(np.sum(val_error**2) / np.sum(val_mask))
 print(f"\nRMSE no conjunto de validação: {val_rmse:.4f}")
 
 # %%
+# %% [markdown]
+# ## 4. Implementação do Sistema de Recomendação usando SLIM
+
+# %%
+def slim(matrix, learning_rate=0.001, l2_reg=0.001, l1_reg=0.0001, max_iter=1000, tol=0.01):
+    """
+    Implementa o algoritmo SLIM com gradiente descendente e projeção.
+
+    Parâmetros:
+    - R: matriz de treino (usuários x itens)
+    - learning_rate: taxa de aprendizado
+    - l2_reg: regularização L2
+    - l1_reg: regularização L1
+    - max_iter: número máximo de iterações
+    - tol: tolerância para convergência
+
+    Retorna:
+    - W: matriz de similaridade entre itens
+    - losses: valores de perda em cada iteração
+    """
+    R = matrix.copy()
+    n_items = R.shape[1]
+
+    mask = (R > 0).astype(int)
+
+    # Inicialização com valores pequenos não-negativos
+    W = np.random.rand(n_items, n_items) * 0.01
+    np.fill_diagonal(W, 0)  # Garantir que Wii = 0
+
+    losses = []
+
+    # Iterações do algoritmo
+    for iter in range(max_iter):
+        W_old = W.copy()
+
+        # Erro de reconstrução
+        error = mask * (R - R @ W)
+
+        # Gradiente com regularização
+        gradient = -R.T @ error + l2_reg * W + l1_reg * np.sign(W)
+
+        # Atualização com gradiente descendente
+        W -= learning_rate * gradient
+
+        # Projeção
+        W[W < 0] = 0
+        np.fill_diagonal(W, 0)
+
+        # Calcula RMSE
+        error = mask * (R - R @ W)
+        loss = np.sqrt(np.sum(error**2) / np.sum(mask))
+        print(loss)
+        losses.append(loss)
+
+        # Verificação de convergência
+        change = np.max(np.abs(W - W_old)) / (np.max(W_old))
+        if change < tol:
+            print(f"Convergência alcançada após {iter+1} iterações")
+            break
+
+    if iter == max_iter - 1:
+        print(f"Número máximo de iterações ({max_iter}) alcançado sem convergência")
+
+    return W, losses
+
+#%%
+def slim_cord_desc(matrix, learning_rate=0.001, l2_reg=0.001, l1_reg=0.0001, max_iter=1000, tol=0.01):
+    """
+    Implementa o algoritmo SLIM com descida de coordenada e projeção.
+
+    Parâmetros:
+    - R: matriz de treino (usuários x itens)
+    - learning_rate: taxa de aprendizado (não usada diretamente na Descida Coordenada simples, mas mantida para assinatura da função)
+    - l2_reg: regularização L2
+    - l1_reg: regularização L1
+    - max_iter: número máximo de iterações
+    - tol: tolerância para convergência
+
+    Retorna:
+    - W: matriz de similaridade entre itens
+    - losses: valores de perda em cada iteração
+    """
+    R = matrix.copy()
+    n_users, n_items = R.shape
+
+    mask = (R > 0).astype(int)
+
+    # Inicialização com valores pequenos não-negativos
+    W = np.random.rand(n_items, n_items) * 0.01
+    np.fill_diagonal(W, 0)  # Garantir que Wii = 0
+
+    # Pré-computar as normas L2 ao quadrado das colunas de itens da matriz R
+    # (equivalente a 'cnorms' na implementação em C)
+    R_col_norms_sq = np.sum(R**2, axis=0)
+
+    # Inicializar R_hat = R @ W. Esta matriz será atualizada incrementalmente.
+    R_hat = R @ W
+
+    losses = []
+
+    # Iterações principais do algoritmo
+    for iter_main in range(max_iter):
+        W_old = W.copy() # Copia W para verificar a convergência no final da iteração
+
+        # Loop sobre cada item 'j' que será o item alvo (coluna 'j' em W)
+        for j in range(n_items):
+            # Obtém a coluna alvo R_j (equivalente a 'y' no código C)
+            target_column_Rj = R[:, j]
+
+            # Loop sobre cada item 'k' que contribuirá para a predição do item 'j' (coluna 'k' em W_j)
+            for k in range(n_items):
+                # Restrição: Wii = 0 (um item não é similar a si mesmo)
+                if j == k:
+                    continue
+
+                # Obtém o valor atual de W_jk
+                old_W_jk = W[j, k]
+
+                # Denominador: ||R_k||^2 + λ₂
+                # Evita divisão por zero se uma coluna de R for toda zero
+                if R_col_norms_sq[k] == 0:
+                    continue
+                denominator_val = R_col_norms_sq[k] + l2_reg
+
+                # Calcula o termo do 'numerador', equivalente a `aTy - ip` no código C
+                # `aTy`: Produto escalar da coluna alvo R_j e da coluna contribuinte R_k
+                term_aTy = np.dot(R[:, k], target_column_Rj)
+
+                # `ip`: Produto escalar da coluna contribuinte R_k e da predição atual para R_j
+                #      (APÓS remover a contribuição de old_W_jk de R_hat[:, j])
+                # Esta etapa é crucial para a Descida Coordenada, pois otimiza incrementalmente.
+                y_hat_without_old_W_jk = R_hat[:, j] - R[:, k] * old_W_jk
+                term_ip = np.dot(R[:, k], y_hat_without_old_W_jk)
+
+                # O `numerador` final usado na fórmula de soft-thresholding do código C:
+                numerator_val = term_aTy - term_ip
+
+                # Calcula o novo W_jk usando soft-thresholding com restrição de não-negatividade
+                # (A lógica é equivalente à condição `numerator > l1r ? (numerator - l1r) / denom : 0.0` do C)
+                if numerator_val > l1_reg:
+                    new_W_jk = (numerator_val - l1_reg) / denominator_val
+                else:
+                    new_W_jk = 0.0
+
+                # Atualiza W e R_hat incrementalmente se W_jk mudou
+                if new_W_jk != old_W_jk:
+                    W[j, k] = new_W_jk
+                    # Atualiza R_hat[:, j] somando a mudança na contribuição de R_k
+                    R_hat[:, j] += R[:, k] * (new_W_jk - old_W_jk)
+
+        # Calcula o RMSE para o W atual após iterar por todos os elementos
+        # Apenas as entradas observadas são consideradas para o cálculo da perda
+        current_error_matrix = mask * (R - R_hat)
+        loss = np.sqrt(np.sum(current_error_matrix**2) / np.sum(mask))
+        print(loss) # Imprime a perda como no código original
+        losses.append(loss)
+
+        # Verificação de convergência (mantendo a lógica do usuário, mas mais robusta)
+        max_W_old_abs = np.max(np.abs(W_old))
+        if max_W_old_abs > 1e-9: # Evita divisão por zero ou números muito pequenos
+            change = np.max(np.abs(W - W_old)) / max_W_old_abs
+        else: # Se W_old for quase zero, a "mudança" é a própria magnitude de W-W_old
+            change = np.max(np.abs(W - W_old))
+
+        if change < tol:
+            print(f"Convergência alcançada após {iter_main+1} iterações")
+            break
+
+    if iter_main == max_iter - 1:
+        print(f"Número máximo de iterações ({max_iter}) alcançado sem convergência")
+
+    return W, losses
+# %%
+# Executar o algoritmo SLIM no conjunto de treinamento
+learning_rate = 0.0001  # Reduzido para evitar instabilidade
+l2_reg = 0.01
+l1_reg = 0.01
+max_iter = 10
+
+W, losses_slim = slim(train_matrix, learning_rate, l2_reg, l1_reg, max_iter)
+
+# %%
+# Visualizar a curva de perda
+plt.figure(figsize=(10, 5))
+plt.plot(losses_slim)
+plt.xlabel('Iteração')
+plt.ylabel('Perda')
+plt.title('Curva de Perda do SLIM')
+plt.grid(True, alpha=0.3)
+plt.show()
+
+# %%
+# Gerar previsões usando o modelo SLIM
+predictions_slim = train_matrix @ W
+
+# Comparar previsões com valores reais no conjunto de treinamento
+print("\nComparação de previsões no conjunto de treinamento:")
+
+# Selecionar 10 pontos aleatórios com avaliações > 0
+nonzero_indices = np.where(train_matrix > 0)
+random_indices = np.random.choice(len(nonzero_indices[0]), 10, replace=False)
+print("\nPontos com avaliações > 0:")
+for i in random_indices:
+    user = nonzero_indices[0][i]
+    movie = nonzero_indices[1][i]
+    real = train_matrix[user, movie]
+    pred = predictions_slim[user, movie]
+    print(f"Usuário {user}, Filme {movie}: Real = {real:.2f}, Previsto = {pred:.2f}, Erro = {abs(real-pred):.2f}")
+
+# Selecionar 10 pontos aleatórios com avaliações = 0
+zero_indices = np.where(train_matrix == 0)
+random_indices = np.random.choice(len(zero_indices[0]), 10, replace=False)
+print("\nPontos com avaliações = 0:")
+for i in random_indices:
+    user = zero_indices[0][i]
+    movie = zero_indices[1][i]
+    pred = predictions_slim[user, movie]
+    print(f"Usuário {user}, Filme {movie}: Previsto = {pred:.2f}")
+
+# %%
+# Comparar previsões com valores reais no conjunto de validação
+print("\nComparação de previsões SLIM no conjunto de validação:")
+
+# Selecionar 10 pontos aleatórios com avaliações > 0
+nonzero_indices = np.where(val_matrix > 0)
+random_indices = np.random.choice(len(nonzero_indices[0]), 10, replace=False)
+print("\nPontos com avaliações > 0:")
+for i in random_indices:
+    user = nonzero_indices[0][i]
+    movie = nonzero_indices[1][i]
+    real = val_matrix[user, movie]
+    pred = predictions_slim[user, movie]
+    print(f"Usuário {user}, Filme {movie}: Real = {real:.2f}, Previsto = {pred:.2f}, Erro = {abs(real-pred):.2f}")
+
+# %%
+# Comparar previsões com valores reais no conjunto de teste
+print("\nComparação de previsões SLIM no conjunto de teste:")
+
+# Selecionar 10 pontos aleatórios com avaliações > 0
+nonzero_indices = np.where(test_matrix > 0)
+random_indices = np.random.choice(len(nonzero_indices[0]), 10, replace=False)
+print("\nPontos com avaliações > 0:")
+for i in random_indices:
+    user = nonzero_indices[0][i]
+    movie = nonzero_indices[1][i]
+    real = test_matrix[user, movie]
+    pred = predictions_slim[user, movie]
+    print(f"Usuário {user}, Filme {movie}: Real = {real:.2f}, Previsto = {pred:.2f}, Erro = {abs(real-pred):.2f}")
+
+# %%
+# Calcular RMSE no conjunto de validação
+val_mask = (val_matrix > 0).astype(int)
+val_error_slim = val_mask * (val_matrix - predictions_slim)
+val_rmse_slim = np.sqrt(np.sum(val_error_slim**2) / np.sum(val_mask))
+print(f"\nRMSE do SLIM no conjunto de validação: {val_rmse_slim:.4f}")
+
+# %%
+# %% [markdown]
+# ## 5. Funções de Avaliação
+
+# %%
+def calculate_rmse(true_matrix, pred_matrix):
+    """
+    Calcula RMSE apenas nas posições onde há avaliações conhecidas
+    """
+    mask = (true_matrix > 0).astype(int)
+    error = mask * (true_matrix - pred_matrix)
+    rmse = np.sqrt(np.sum(error**2) / np.sum(mask))
+    return rmse
+
+def calculate_recall_at_k(true_matrix, pred_matrix, exclude_matrix=None, k=10, threshold=4):
+    """
+    Calcula Recall@k para cada usuário e retorna a média
+    Considera apenas filmes com rating >= threshold como relevantes
+    exclude_matrix: matriz adicional para excluir (ex: validação quando calculando teste)
+    """
+    n_users, n_movies = true_matrix.shape
+    recalls = []
+
+    for user in range(n_users):
+        # Encontrar filmes com rating alto no conjunto atual
+        relevant_movies = np.where(true_matrix[user] >= threshold)[0]
+
+        # Se o usuário não tem filmes com rating alto, pula
+        if len(relevant_movies) == 0:
+            continue
+
+        # Encontrar top-k filmes recomendados (maiores predições)
+        pred_user = pred_matrix[user].copy()
+
+        # Excluir filmes já avaliados no treino
+        train_movies = np.where(train_matrix[user] > 0)[0]
+        pred_user[train_movies] = -np.inf
+
+        # Excluir filmes da matriz adicional (ex: validação quando avaliando teste)
+        if exclude_matrix is not None:
+            exclude_movies = np.where(exclude_matrix[user] > 0)[0]
+            pred_user[exclude_movies] = -np.inf
+
+        top_k_movies = np.argsort(pred_user)[-k:][::-1]
+
+        # Calcular recall
+        relevant_in_top_k = len(np.intersect1d(relevant_movies, top_k_movies))
+        recall = relevant_in_top_k / len(relevant_movies)
+        recalls.append(recall)
+
+    return np.mean(recalls) if recalls else 0.0
+
+# %%
+# %% [markdown]
+# ## 6. Avaliação e Seleção de Hiperparâmetros
+
+# %%
+def evaluate_nmf_hyperparams(train_matrix, val_matrix):
+    """
+    Avalia diferentes hiperparâmetros para NMF usando conjunto de validação
+    Retorna melhores parâmetros para RMSE e Recall separadamente
+    """
+    k_values = [5, 10, 15, 20]
+    alpha_values = [0.0001, 0.001, 0.01]
+    beta_values = [0.0001, 0.001, 0.01]
+
+    best_rmse = float('inf')
+    best_recall = 0.0
+    best_params_rmse = {}
+    best_params_recall = {}
+    results = []
+
+    print("Avaliando hiperparâmetros do NMF...")
+
+    for k in k_values:
+        for alpha in alpha_values:
+            for beta in beta_values:
+                print(f"Testando k={k}, alpha={alpha}, beta={beta}")
+
+                # Treinar modelo
+                W, H, losses = nmf(train_matrix, k, max_iter=200, alpha=alpha, beta=beta)
+                predictions = W @ H
+
+                # Avaliar no conjunto de validação
+                rmse = calculate_rmse(val_matrix, predictions)
+                recall = calculate_recall_at_k(val_matrix, predictions)
+
+                results.append({
+                    'k': k, 'alpha': alpha, 'beta': beta,
+                    'rmse': rmse, 'recall': recall
+                })
+
+                # Atualizar melhores parâmetros para RMSE
+                if rmse < best_rmse:
+                    best_rmse = rmse
+                    best_params_rmse = {'k': k, 'alpha': alpha, 'beta': beta}
+
+                # Atualizar melhores parâmetros para Recall
+                if recall > best_recall:
+                    best_recall = recall
+                    best_params_recall = {'k': k, 'alpha': alpha, 'beta': beta}
+
+                print(f"RMSE: {rmse:.4f}, Recall@10: {recall:.4f}")
+
+    print(f"\nMelhores parâmetros NMF (RMSE): {best_params_rmse} (RMSE: {best_rmse:.4f})")
+    print(f"Melhores parâmetros NMF (Recall): {best_params_recall} (Recall: {best_recall:.4f})")
+    return best_params_rmse, best_params_recall, results
+
+def evaluate_svd_hyperparams(train_matrix, val_matrix):
+    """
+    Avalia diferentes hiperparâmetros para SVD usando conjunto de validação
+    Retorna melhores parâmetros para RMSE e Recall@10 separadamente
+    """
+    k_values = [5, 10, 15, 20]
+    reg_values = [0.0, 0.001, 0.01, 0.1]
+
+    best_rmse = float('inf')
+    best_recall = 0.0
+    best_params_rmse = {}
+    best_params_recall = {}
+    results = []
+
+    print("Avaliando hiperparâmetros do SVD...")
+
+    for k in k_values:
+        for reg in reg_values:
+            print(f"Testando k={k}, regularization={reg}")
+
+            # Treinar modelo
+            Q, Sigma, P, losses = svd(train_matrix, k, max_iter=100, regularization=reg)
+            predictions = Q @ Sigma @ P.T
+
+            # Avaliar no conjunto de validação
+            rmse = calculate_rmse(val_matrix, predictions)
+            recall = calculate_recall_at_k(val_matrix, predictions)
+
+            results.append({
+                'k': k, 'regularization': reg,
+                'rmse': rmse, 'recall': recall
+            })
+
+            # Atualizar melhores parâmetros para RMSE
+            if rmse < best_rmse:
+                best_rmse = rmse
+                best_params_rmse = {'k': k, 'regularization': reg}
+
+            # Atualizar melhores parâmetros para Recall
+            if recall > best_recall:
+                best_recall = recall
+                best_params_recall = {'k': k, 'regularization': reg}
+
+            print(f"RMSE: {rmse:.4f}, Recall@10: {recall:.4f}")
+
+    print(f"\nMelhores parâmetros SVD (RMSE): {best_params_rmse} (RMSE: {best_rmse:.4f})")
+    print(f"Melhores parâmetros SVD (Recall): {best_params_recall} (Recall: {best_recall:.4f})")
+    return best_params_rmse, best_params_recall, results
+
+def evaluate_slim_hyperparams(train_matrix, val_matrix):
+    """
+    Avalia diferentes hiperparâmetros para SLIM usando conjunto de validação
+    Retorna melhores parâmetros para RMSE e Recall@10 separadamente
+    """
+    learning_rate = 0.000001  # Conforme solicitado
+    l2_values = [0.001, 0.01, 0.1]
+    l1_values = [0.001, 0.01, 0.1]
+
+    best_rmse = float('inf')
+    best_recall = 0.0
+    best_params_rmse = {}
+    best_params_recall = {}
+    results = []
+
+    print("Avaliando hiperparâmetros do SLIM...")
+
+    for l2_reg in l2_values:
+        for l1_reg in l1_values:
+            print(f"Testando l2_reg={l2_reg}, l1_reg={l1_reg}")
+
+            # Treinar modelo
+            W, losses = slim(train_matrix, learning_rate, l2_reg, l1_reg, max_iter=50)
+            predictions = train_matrix @ W
+
+            # Avaliar no conjunto de validação
+            rmse = calculate_rmse(val_matrix, predictions)
+            recall = calculate_recall_at_k(val_matrix, predictions)
+
+            results.append({
+                'l2_reg': l2_reg, 'l1_reg': l1_reg,
+                'rmse': rmse, 'recall': recall
+            })
+
+            # Atualizar melhores parâmetros para RMSE
+            if rmse < best_rmse:
+                best_rmse = rmse
+                best_params_rmse = {'l2_reg': l2_reg, 'l1_reg': l1_reg}
+
+            # Atualizar melhores parâmetros para Recall
+            if recall > best_recall:
+                best_recall = recall
+                best_params_recall = {'l2_reg': l2_reg, 'l1_reg': l1_reg}
+
+            print(f"RMSE: {rmse:.4f}, Recall@10: {recall:.4f}")
+
+    print(f"\nMelhores parâmetros SLIM (RMSE): {best_params_rmse} (RMSE: {best_rmse:.4f})")
+    print(f"Melhores parâmetros SLIM (Recall): {best_params_recall} (Recall: {best_recall:.4f})")
+    return best_params_rmse, best_params_recall, results
+
+# %%
+# Executar avaliação de hiperparâmetros
+np.random.seed(42)  # Para reprodutibilidade
+
+# Avaliar NMF
+best_nmf_params_rmse, best_nmf_params_recall, nmf_results = evaluate_nmf_hyperparams(train_matrix, val_matrix)
+
+# %%
+# Avaliar SVD
+best_svd_params_rmse, best_svd_params_recall, svd_results = evaluate_svd_hyperparams(train_matrix, val_matrix)
+
+# %%
+# Avaliar SLIM
+best_slim_params_rmse, best_slim_params_recall, slim_results = evaluate_slim_hyperparams(train_matrix, val_matrix)
+
+# %%
+# %% [markdown]
+# ## 7. Treinamento dos Modelos Finais com Melhores Hiperparâmetros
+
+# %%
+print("Treinando modelos finais com melhores hiperparâmetros...")
+
+# Treinar NMF final - RMSE otimizado
+print("Treinando NMF otimizado para RMSE...")
+W_final_rmse, H_final_rmse, losses_nmf_final_rmse = nmf(
+    train_matrix,
+    best_nmf_params_rmse['k'],
+    max_iter=500,
+    alpha=best_nmf_params_rmse['alpha'],
+    beta=best_nmf_params_rmse['beta']
+)
+predictions_nmf_final_rmse = W_final_rmse @ H_final_rmse
+
+# Treinar NMF final - Recall otimizado
+print("Treinando NMF otimizado para Recall@10...")
+W_final_recall, H_final_recall, losses_nmf_final_recall = nmf(
+    train_matrix,
+    best_nmf_params_recall['k'],
+    max_iter=500,
+    alpha=best_nmf_params_recall['alpha'],
+    beta=best_nmf_params_recall['beta']
+)
+predictions_nmf_final_recall = W_final_recall @ H_final_recall
+
+# %%
+# Treinar SVD final - RMSE otimizado
+print("Treinando SVD otimizado para RMSE...")
+Q_final_rmse, Sigma_final_rmse, P_final_rmse, losses_svd_final_rmse = svd(
+    train_matrix,
+    best_svd_params_rmse['k'],
+    max_iter=200,
+    regularization=best_svd_params_rmse['regularization']
+)
+predictions_svd_final_rmse = Q_final_rmse @ Sigma_final_rmse @ P_final_rmse.T
+
+# Treinar SVD final - Recall otimizado
+print("Treinando SVD otimizado para Recall@10...")
+Q_final_recall, Sigma_final_recall, P_final_recall, losses_svd_final_recall = svd(
+    train_matrix,
+    best_svd_params_recall['k'],
+    max_iter=200,
+    regularization=best_svd_params_recall['regularization']
+)
+predictions_svd_final_recall = Q_final_recall @ Sigma_final_recall @ P_final_recall.T
+
+# %%
+# Treinar SLIM final - RMSE otimizado
+print("Treinando SLIM otimizado para RMSE...")
+W_slim_final_rmse, losses_slim_final_rmse = slim(
+    train_matrix,
+    learning_rate=0.000001,  # Conforme solicitado
+    l2_reg=best_slim_params_rmse['l2_reg'],
+    l1_reg=best_slim_params_rmse['l1_reg'],
+    max_iter=100
+)
+predictions_slim_final_rmse = train_matrix @ W_slim_final_rmse
+
+# Treinar SLIM final - Recall otimizado
+print("Treinando SLIM otimizado para Recall@10...")
+W_slim_final_recall, losses_slim_final_recall = slim(
+    train_matrix,
+    learning_rate=0.000001,  # Conforme solicitado
+    l2_reg=best_slim_params_recall['l2_reg'],
+    l1_reg=best_slim_params_recall['l1_reg'],
+    max_iter=100
+)
+predictions_slim_final_recall = train_matrix @ W_slim_final_recall
+
+# %%
+# %% [markdown]
+# ## 8. Avaliação Final no Conjunto de Teste
+
+# %%
+# Calcular métricas no conjunto de teste
+print("Avaliação final no conjunto de teste:")
+
+# Modelos otimizados para RMSE
+rmse_nmf_test_rmse = calculate_rmse(test_matrix, predictions_nmf_final_rmse)
+rmse_svd_test_rmse = calculate_rmse(test_matrix, predictions_svd_final_rmse)
+rmse_slim_test_rmse = calculate_rmse(test_matrix, predictions_slim_final_rmse)
+
+recall_nmf_test_rmse = calculate_recall_at_k(test_matrix, predictions_nmf_final_rmse, exclude_matrix=val_matrix)
+recall_svd_test_rmse = calculate_recall_at_k(test_matrix, predictions_svd_final_rmse, exclude_matrix=val_matrix)
+recall_slim_test_rmse = calculate_recall_at_k(test_matrix, predictions_slim_final_rmse, exclude_matrix=val_matrix)
+
+# Modelos otimizados para Recall
+rmse_nmf_test_recall = calculate_rmse(test_matrix, predictions_nmf_final_recall)
+rmse_svd_test_recall = calculate_rmse(test_matrix, predictions_svd_final_recall)
+rmse_slim_test_recall = calculate_rmse(test_matrix, predictions_slim_final_recall)
+
+recall_nmf_test_recall = calculate_recall_at_k(test_matrix, predictions_nmf_final_recall, exclude_matrix=val_matrix)
+recall_svd_test_recall = calculate_recall_at_k(test_matrix, predictions_svd_final_recall, exclude_matrix=val_matrix)
+recall_slim_test_recall = calculate_recall_at_k(test_matrix, predictions_slim_final_recall, exclude_matrix=val_matrix)
+
+print(f"\nResultados dos modelos otimizados para RMSE:")
+print(f"NMF  - RMSE: {rmse_nmf_test_rmse:.4f}, Recall@10: {recall_nmf_test_rmse:.4f}")
+print(f"SVD  - RMSE: {rmse_svd_test_rmse:.4f}, Recall@10: {recall_svd_test_rmse:.4f}")
+print(f"SLIM - RMSE: {rmse_slim_test_rmse:.4f}, Recall@10: {recall_slim_test_rmse:.4f}")
+
+print(f"\nResultados dos modelos otimizados para Recall@10:")
+print(f"NMF  - RMSE: {rmse_nmf_test_recall:.4f}, Recall@10: {recall_nmf_test_recall:.4f}")
+print(f"SVD  - RMSE: {rmse_svd_test_recall:.4f}, Recall@10: {recall_svd_test_recall:.4f}")
+print(f"SLIM - RMSE: {rmse_slim_test_recall:.4f}, Recall@10: {recall_slim_test_recall:.4f}")
+
+# %%
+# %% [markdown]
+# ## 9. Visualização dos Resultados
+
+# %%
+# Gráfico de barras comparando modelos otimizados para RMSE vs Recall
+models = ['NMF', 'SVD', 'SLIM']
+rmse_values_rmse = [rmse_nmf_test_rmse, rmse_svd_test_rmse, rmse_slim_test_rmse]
+recall_values_recall = [recall_nmf_test_recall, recall_svd_test_recall, recall_slim_test_recall]
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+# RMSE dos modelos otimizados para RMSE
+colors1 = ['#FF6B6B', '#4ECDC4', '#45B7D1']
+bars1 = ax1.bar(models, rmse_values_rmse, color=colors1, alpha=0.8, edgecolor='black')
+ax1.set_ylabel('RMSE')
+ax1.set_title('RMSE - Modelos Otimizados para RMSE')
+ax1.grid(True, alpha=0.3)
+
+for bar, value in zip(bars1, rmse_values_rmse):
+    height = bar.get_height()
+    ax1.text(bar.get_x() + bar.get_width()/2., height + 0.001,
+             f'{value:.4f}', ha='center', va='bottom', fontweight='bold')
+
+# Recall@10 dos modelos otimizados para Recall
+bars2 = ax2.bar(models, recall_values_recall, color=colors1, alpha=0.8, edgecolor='black')
+ax2.set_ylabel('Recall@10')
+ax2.set_title('Recall@10 - Modelos Otimizados para Recall@10')
+ax2.grid(True, alpha=0.3)
+
+for bar, value in zip(bars2, recall_values_recall):
+    height = bar.get_height()
+    ax2.text(bar.get_x() + bar.get_width()/2., height + 0.002,
+             f'{value:.4f}', ha='center', va='bottom', fontweight='bold')
+
+plt.tight_layout()
+plt.show()
+
+# %%
+# Gráficos das curvas de convergência
+fig, ((ax1, ax2), (ax3, ax4), (ax5, ax6)) = plt.subplots(3, 2, figsize=(16, 15))
+
+# NMF
+ax1.plot(losses_nmf_final_rmse, color='#FF6B6B', linewidth=2)
+ax1.set_xlabel('Iteração')
+ax1.set_ylabel('RMSE')
+ax1.set_title('NMF - Otimizado para RMSE')
+ax1.grid(True, alpha=0.3)
+
+ax2.plot(losses_nmf_final_recall, color='#FF6B6B', linewidth=2)
+ax2.set_xlabel('Iteração')
+ax2.set_ylabel('RMSE')
+ax2.set_title('NMF - Otimizado para Recall@10')
+ax2.grid(True, alpha=0.3)
+
+# SVD
+ax3.plot(losses_svd_final_rmse, color='#4ECDC4', linewidth=2)
+ax3.set_xlabel('Iteração')
+ax3.set_ylabel('RMSE')
+ax3.set_title('SVD - Otimizado para RMSE')
+ax3.grid(True, alpha=0.3)
+
+ax4.plot(losses_svd_final_recall, color='#4ECDC4', linewidth=2)
+ax4.set_xlabel('Iteração')
+ax4.set_ylabel('RMSE')
+ax4.set_title('SVD - Otimizado para Recall@10')
+ax4.grid(True, alpha=0.3)
+
+# SLIM
+ax5.plot(losses_slim_final_rmse, color='#45B7D1', linewidth=2)
+ax5.set_xlabel('Iteração')
+ax5.set_ylabel('RMSE')
+ax5.set_title('SLIM - Otimizado para RMSE')
+ax5.grid(True, alpha=0.3)
+
+ax6.plot(losses_slim_final_recall, color='#45B7D1', linewidth=2)
+ax6.set_xlabel('Iteração')
+ax6.set_ylabel('RMSE')
+ax6.set_title('SLIM - Otimizado para Recall@10')
+ax6.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+# %%
+# Tabela resumo completa dos resultados
+print("\n" + "="*100)
+print("RESUMO DOS RESULTADOS FINAIS")
+print("="*100)
+print(f"{'Modelo':<15} {'Otimização':<12} {'RMSE Teste':<12} {'Recall@10':<12} {'Hiperparâmetros'}")
+print("-"*100)
+
+# Modelos otimizados para RMSE
+print(f"{'NMF':<15} {'RMSE':<12} {rmse_nmf_test_rmse:<12.4f} {recall_nmf_test_rmse:<12.4f} k={best_nmf_params_rmse['k']}, α={best_nmf_params_rmse['alpha']}, β={best_nmf_params_rmse['beta']}")
+print(f"{'SVD':<15} {'RMSE':<12} {rmse_svd_test_rmse:<12.4f} {recall_svd_test_rmse:<12.4f} k={best_svd_params_rmse['k']}, reg={best_svd_params_rmse['regularization']}")
+print(f"{'SLIM':<15} {'RMSE':<12} {rmse_slim_test_rmse:<12.4f} {recall_slim_test_rmse:<12.4f} l2={best_slim_params_rmse['l2_reg']}, l1={best_slim_params_rmse['l1_reg']}")
+
+print()
+# Modelos otimizados para Recall
+print(f"{'NMF':<15} {'Recall@10':<12} {rmse_nmf_test_recall:<12.4f} {recall_nmf_test_recall:<12.4f} k={best_nmf_params_recall['k']}, α={best_nmf_params_recall['alpha']}, β={best_nmf_params_recall['beta']}")
+print(f"{'SVD':<15} {'Recall@10':<12} {rmse_svd_test_recall:<12.4f} {recall_svd_test_recall:<12.4f} k={best_svd_params_recall['k']}, reg={best_svd_params_recall['regularization']}")
+print(f"{'SLIM':<15} {'Recall@10':<12} {rmse_slim_test_recall:<12.4f} {recall_slim_test_recall:<12.4f} l2={best_slim_params_recall['l2_reg']}, l1={best_slim_params_recall['l1_reg']}")
+
+print("="*100)
+
+# Determinar melhores modelos
+all_rmse_values = rmse_values_rmse
+all_recall_values = recall_values_recall
+all_model_names = [f'{m} (RMSE)' for m in models] + [f'{m} (Recall)' for m in models]
+
+best_rmse_idx = np.argmin(all_rmse_values)
+best_recall_idx = np.argmax(all_recall_values)
+
+print(f"\nMelhor modelo por RMSE: {all_model_names[best_rmse_idx]} ({all_rmse_values[best_rmse_idx]:.4f})")
+print(f"Melhor modelo por Recall@10: {all_model_names[best_recall_idx]} ({all_recall_values[best_recall_idx]:.4f})")
+
+# %%
